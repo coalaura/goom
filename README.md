@@ -1,4 +1,4 @@
-# goom
+![banner](.github/banner.png)
 
 Linux has an OOM killer. When memory runs low, it picks a victim and ends it before the whole system goes down. Windows takes a different approach: it happily hands out memory it doesn't have, slows to a crawl, pages everything to disk and eventually just freezes or crashes; all while assuring every process that yes, there is plenty of memory available.
 
