@@ -1,0 +1,82 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  project_name: goom
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: 'go.mod'
+        cache: false
+
+    - name: Cache Go build and modules
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-windows-${{ matrix.goarch }}-${{ hashFiles('**/go.sum', '**/go.mod') }}
+        restore-keys: |
+          ${{ runner.os }}-go-windows-${{ matrix.goarch }}-
+
+    - name: Build
+      shell: bash
+      env:
+        GOOS: windows
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        mkdir -p bin
+
+        go build \
+          -trimpath \
+          -buildvcs=false \
+          -ldflags "-s -w -X 'main.Version=${{ github.ref_name }}'" \
+          -o "bin/${{ env.project_name }}-${{ matrix.goarch }}.exe" .
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ env.project_name }}_${{ matrix.goarch }}
+        path: bin/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v8
+      with:
+        pattern: ${{ env.project_name }}_*
+        path: bin
+        merge-multiple: true
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: bin/*
+        name: "Release ${{ github.ref_name }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
