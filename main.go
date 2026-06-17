@@ -77,7 +77,6 @@ var (
 	globalTokenUser *windows.Tokenuser
 
 	pids            [MaxProcs]uint32
-	cbNeeded        uint32
 	tokenInfoBuffer [128]uintptr
 
 	currentProcs []procStats
@@ -85,6 +84,14 @@ var (
 
 	logChan         = make(chan logEvent, 1024)
 	pressureSamples int
+
+	scratchPerfInfo performanceInformation
+	scratchCounters processMemoryCountersEx
+	scratchUtf16Buf [512]uint16
+	scratchToken    uintptr
+	scratchTokenLen uint32
+	scratchCbNeeded uint32
+	scratchSize     uint32
 )
 
 func init() {
@@ -101,18 +108,17 @@ func init() {
 	procEqualSid.Find()
 }
 
-func main() {
-	mutexName, err := windows.UTF16PtrFromString("Local\\GoomSingleInstanceMutex")
-	if err != nil {
-		panic("failed to create mutex name: " + err.Error())
-	}
+var mutexName = [...]uint16{
+	'L', 'o', 'c', 'a', 'l', '\\', 'G', 'o', 'o', 'm', 'S', 'i', 'n', 'g', 'l', 'e', 'I', 'n', 's', 't', 'a', 'n', 'c', 'e', 'M', 'u', 't', 'e', 'x', 0,
+}
 
-	h, err := windows.CreateMutex(nil, false, mutexName)
+func main() {
+	h, err := windows.CreateMutex(nil, false, &mutexName[0])
 	if err != nil {
 		if err == windows.ERROR_ALREADY_EXISTS {
 			windows.CloseHandle(h)
 
-			pl.Errorln("GOOM is already running, exiting.")
+			os.Stderr.WriteString("GOOM is already running, exiting.\n")
 
 			os.Exit(0)
 		}
@@ -195,8 +201,10 @@ func monitor() {
 	}
 
 	if pressureSamples >= RequiredSamples {
-		victim, reason := selectVictim(rogueLimit)
-		if victim != nil {
+		victimIdx, reason := selectVictim(rogueLimit)
+		if victimIdx >= 0 {
+			victim := &currentProcs[victimIdx]
+
 			killProcess(victim.pid)
 
 			logEv := logEvent{
@@ -219,11 +227,11 @@ func monitor() {
 	}
 }
 
-func selectVictim(rogueLimit uint64) (*procStats, LogReason) {
+func selectVictim(rogueLimit uint64) (int, LogReason) {
 	var (
-		victim     *procStats
 		maxScore   float64
 		bestReason LogReason
+		victimIdx  = -1
 	)
 
 	for i := range currentProcs {
@@ -256,27 +264,25 @@ func selectVictim(rogueLimit uint64) (*procStats, LogReason) {
 
 		if score > maxScore {
 			maxScore = score
-			victim = proc
+			victimIdx = i
 			bestReason = reason
 		}
 	}
 
-	return victim, bestReason
+	return victimIdx, bestReason
 }
 
 func getSystemMemory() (commitUsed, commitLimit, physicalTotal, physicalAvail uint64) {
-	var info performanceInformation
+	scratchPerfInfo.cb = uint32(unsafe.Sizeof(scratchPerfInfo))
 
-	info.cb = uint32(unsafe.Sizeof(info))
-
-	r1, _, _ := syscall.SyscallN(procGetPerformanceInfo.Addr(), uintptr(unsafe.Pointer(&info)), uintptr(info.cb))
+	r1, _, _ := syscall.SyscallN(procGetPerformanceInfo.Addr(), uintptr(unsafe.Pointer(&scratchPerfInfo)), uintptr(scratchPerfInfo.cb))
 	if r1 == 0 {
 		return 0, 0, 0, 0
 	}
 
-	pageSize := uint64(info.pageSize)
+	pageSize := uint64(scratchPerfInfo.pageSize)
 
-	return uint64(info.commitTotal) * pageSize, uint64(info.commitLimit) * pageSize, uint64(info.physicalTotal) * pageSize, uint64(info.physicalAvailable) * pageSize
+	return uint64(scratchPerfInfo.commitTotal) * pageSize, uint64(scratchPerfInfo.commitLimit) * pageSize, uint64(scratchPerfInfo.physicalTotal) * pageSize, uint64(scratchPerfInfo.physicalAvailable) * pageSize
 }
 
 func getPrivateBytes(pid uint32) uint64 {
@@ -289,14 +295,12 @@ func getPrivateBytes(pid uint32) uint64 {
 
 	defer syscall.SyscallN(procCloseHandle.Addr(), handle)
 
-	var counters processMemoryCountersEx
+	scratchCounters.cb = uint32(unsafe.Sizeof(scratchCounters))
 
-	counters.cb = uint32(unsafe.Sizeof(counters))
-
-	r1, _, _ = syscall.SyscallN(procGetProcessMemoryInfo.Addr(), handle, uintptr(unsafe.Pointer(&counters)), uintptr(counters.cb))
+	r1, _, _ = syscall.SyscallN(procGetProcessMemoryInfo.Addr(), handle, uintptr(unsafe.Pointer(&scratchCounters)), uintptr(scratchCounters.cb))
 	if r1 == 0 {
 		return 0
 	}
 
-	return uint64(counters.privateUsage)
+	return uint64(scratchCounters.privateUsage)
 }

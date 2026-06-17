@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"os"
 	"slices"
 	"syscall"
@@ -24,18 +23,42 @@ type procStats struct {
 }
 
 func getPids() []uint32 {
-	r1, _, _ := syscall.SyscallN(procEnumProcesses.Addr(), uintptr(unsafe.Pointer(&pids[0])), uintptr(len(pids)*4), uintptr(unsafe.Pointer(&cbNeeded)))
+	scratchCbNeeded = 0
+
+	r1, _, _ := syscall.SyscallN(procEnumProcesses.Addr(), uintptr(unsafe.Pointer(&pids[0])), uintptr(len(pids)*4), uintptr(unsafe.Pointer(&scratchCbNeeded)))
 	if r1 == 0 {
 		return pids[:0]
 	}
 
-	count := cbNeeded / 4
+	count := scratchCbNeeded / 4
 
 	if count > uint32(len(pids)) {
 		count = uint32(len(pids))
 	}
 
 	return pids[:count]
+}
+
+func binarySearch(pid uint32) (int, bool) {
+	var (
+		low  int
+		high = len(currentProcs) - 1
+	)
+
+	for low <= high {
+		mid := int(uint(low+high) >> 1)
+		midVal := currentProcs[mid].pid
+
+		if midVal < pid {
+			low = mid + 1
+		} else if midVal > pid {
+			high = mid - 1
+		} else {
+			return mid, true
+		}
+	}
+
+	return low, false
 }
 
 func updateProcs() {
@@ -54,9 +77,7 @@ func updateProcs() {
 			break
 		}
 
-		idx, found := slices.BinarySearchFunc(currentProcs, pid, func(p procStats, t uint32) int {
-			return cmp.Compare(p.pid, t)
-		})
+		idx, found := binarySearch(pid)
 
 		var stats procStats
 
@@ -89,26 +110,24 @@ func getProcessName(pid uint32, dest *[32]byte) int {
 
 	defer syscall.SyscallN(procCloseHandle.Addr(), handle)
 
-	var utf16Buf [260]uint16
-
-	size := uint32(len(utf16Buf))
+	scratchSize = uint32(len(scratchUtf16Buf))
 
 	r1, _, _ = syscall.SyscallN(
 		procQueryFullProcessImageNameW.Addr(),
 		handle,
 		0,
-		uintptr(unsafe.Pointer(&utf16Buf[0])),
-		uintptr(unsafe.Pointer(&size)),
+		uintptr(unsafe.Pointer(&scratchUtf16Buf[0])),
+		uintptr(unsafe.Pointer(&scratchSize)),
 	)
 
-	if r1 == 0 || size == 0 {
+	if r1 == 0 || scratchSize == 0 {
 		return 0
 	}
 
 	var start int
 
-	for i := int(size) - 1; i >= 0; i-- {
-		if utf16Buf[i] == '\\' || utf16Buf[i] == '/' {
+	for i := int(scratchSize) - 1; i >= 0; i-- {
+		if scratchUtf16Buf[i] == '\\' || scratchUtf16Buf[i] == '/' {
 			start = i + 1
 
 			break
@@ -117,8 +136,8 @@ func getProcessName(pid uint32, dest *[32]byte) int {
 
 	var written int
 
-	for i := start; i < int(size) && written < len(dest); i++ {
-		char := utf16Buf[i]
+	for i := start; i < int(scratchSize) && written < len(dest); i++ {
+		char := scratchUtf16Buf[i]
 
 		if char < 128 {
 			dest[written] = byte(char)
@@ -142,16 +161,18 @@ func isMyProcess(pid uint32) bool {
 
 	defer syscall.SyscallN(procCloseHandle.Addr(), handle)
 
-	var token uintptr
+	scratchToken = 0
 
-	r1, _, _ = syscall.SyscallN(procOpenProcessToken.Addr(), handle, windows.TOKEN_QUERY, uintptr(unsafe.Pointer(&token)))
+	r1, _, _ = syscall.SyscallN(procOpenProcessToken.Addr(), handle, windows.TOKEN_QUERY, uintptr(unsafe.Pointer(&scratchToken)))
 	if r1 == 0 {
 		return false
 	}
 
+	token := scratchToken
+
 	defer syscall.SyscallN(procCloseHandle.Addr(), token)
 
-	var retLen uint32
+	scratchTokenLen = 0
 
 	r1, _, _ = syscall.SyscallN(
 		procGetTokenInformation.Addr(),
@@ -159,7 +180,7 @@ func isMyProcess(pid uint32) bool {
 		windows.TokenUser,
 		uintptr(unsafe.Pointer(&tokenInfoBuffer[0])),
 		uintptr(len(tokenInfoBuffer)*int(unsafe.Sizeof(tokenInfoBuffer[0]))),
-		uintptr(unsafe.Pointer(&retLen)),
+		uintptr(unsafe.Pointer(&scratchTokenLen)),
 	)
 
 	if r1 == 0 {

@@ -4,9 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"unsafe"
-
-	"github.com/coalaura/plain"
 )
 
 type LogReason uint8
@@ -30,8 +27,6 @@ type logEvent struct {
 	reason  LogReason
 }
 
-var pl = plain.New()
-
 func sendMsg(msgType int, text string) {
 	var event logEvent
 
@@ -51,12 +46,12 @@ func startLogger() {
 	if err == nil {
 		path = filepath.Join(home, path)
 	} else {
-		pl.Warnf("Failed to get user home: %v\n", err)
+		os.Stderr.WriteString("Failed to get user home\n")
 	}
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		pl.Warnf("Failed to open log: %v\n", err)
+		os.Stderr.WriteString("Failed to open log file\n")
 	}
 
 	go func() {
@@ -64,10 +59,7 @@ func startLogger() {
 			defer file.Close()
 		}
 
-		var (
-			logStr string
-			buf    = make([]byte, 0, 512)
-		)
+		buf := make([]byte, 0, 512)
 
 		for ev := range logChan {
 			buf = buf[:0]
@@ -113,21 +105,14 @@ func startLogger() {
 
 			buf = append(buf, '\n')
 
-			if len(buf) > 1 {
-				logStr = unsafe.String(unsafe.SliceData(buf), len(buf)-1)
-			}
-
-			switch ev.msgType {
-			case 0:
-				pl.Println(logStr)
-			case 1:
-				pl.Warnln(logStr)
-			case 2:
-				pl.Errorln(logStr)
-			}
-
 			if file != nil {
-				file.Write(buf)
+				_, _ = file.Write(buf)
+			}
+
+			if ev.msgType == 0 {
+				_, _ = os.Stdout.Write(buf)
+			} else {
+				_, _ = os.Stderr.Write(buf)
 			}
 		}
 	}()
