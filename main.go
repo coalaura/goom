@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"runtime/debug"
 	"syscall"
@@ -8,6 +9,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 )
 
 const (
@@ -109,14 +111,21 @@ func init() {
 }
 
 var mutexName = [...]uint16{
-	'L', 'o', 'c', 'a', 'l', '\\', 'G', 'o', 'o', 'm', 'S', 'i', 'n', 'g', 'l', 'e', 'I', 'n', 's', 't', 'a', 'n', 'c', 'e', 'M', 'u', 't', 'e', 'x', 0,
+	'G', 'l', 'o', 'b', 'a', 'l', '\\', 'G', 'o', 'o', 'm', 'S', 'i', 'n', 'g', 'l', 'e', 'I', 'n', 's', 't', 'a', 'n', 'c', 'e', 'M', 'u', 't', 'e', 'x', 0,
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		handleFlags()
+		return
+	}
+
 	h, err := windows.CreateMutex(nil, false, &mutexName[0])
 	if err != nil {
-		if err == windows.ERROR_ALREADY_EXISTS {
-			windows.CloseHandle(h)
+		if err == windows.ERROR_ALREADY_EXISTS || err == windows.ERROR_ACCESS_DENIED {
+			if h != 0 {
+				windows.CloseHandle(h)
+			}
 
 			os.Stderr.WriteString("GOOM is already running, exiting.\n")
 
@@ -127,6 +136,20 @@ func main() {
 	}
 
 	defer windows.CloseHandle(h)
+
+	isService, err := svc.IsWindowsService()
+	if err != nil {
+		panic("failed to determine if running as service: " + err.Error())
+	}
+
+	if isService {
+		err = svc.Run(serviceName, &goomService{})
+		if err != nil {
+			panic("failed to run service: " + err.Error())
+		}
+
+		return
+	}
 
 	debug.SetMemoryLimit(32 << 20)
 
@@ -143,6 +166,33 @@ func main() {
 
 	for range ticker.C {
 		monitor()
+	}
+}
+
+func handleFlags() {
+	switch os.Args[1] {
+	case "--install":
+		err := installService()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to install service: %v\n", err)
+
+			os.Exit(1)
+		}
+
+		fmt.Println("Service installed and started successfully.")
+	case "--uninstall":
+		err := uninstallService()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to uninstall service: %v\n", err)
+
+			os.Exit(1)
+		}
+
+		fmt.Println("Service uninstalled successfully.")
+	default:
+		fmt.Fprintf(os.Stderr, "unknown flag: %s\nUsage:\n  goom.exe [--install | --uninstall]\n", os.Args[1])
+
+		os.Exit(1)
 	}
 }
 

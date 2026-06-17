@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -51,25 +50,7 @@ func sendMsg(msgType int, text string) {
 }
 
 func startLogger() {
-	path := "goom.log"
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		path = filepath.Join(home, path)
-	} else {
-		os.Stderr.WriteString("Failed to get user home\n")
-	}
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		os.Stderr.WriteString("Failed to open log file\n")
-	}
-
 	go func() {
-		if file != nil {
-			defer file.Close()
-		}
-
 		buf := make([]byte, 0, 512)
 
 		for ev := range logChan {
@@ -147,10 +128,6 @@ func startLogger() {
 			}
 
 			buf = append(buf, '\n')
-
-			if file != nil {
-				_, _ = file.Write(buf)
-			}
 
 			if ev.msgType == 0 {
 				_, _ = os.Stdout.Write(buf)
