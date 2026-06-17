@@ -1,17 +1,12 @@
 package main
 
 import (
-	"cmp"
 	"os"
-	"path/filepath"
 	"runtime/debug"
-	"slices"
-	"strconv"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"github.com/coalaura/plain"
 	"golang.org/x/sys/windows"
 )
 
@@ -28,9 +23,10 @@ var (
 	modadvapi32 = windows.NewLazySystemDLL("advapi32.dll")
 	modkernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	procEnumProcesses        = modpsapi.NewProc("EnumProcesses")
-	procGetPerformanceInfo   = modpsapi.NewProc("GetPerformanceInfo")
-	procGetProcessMemoryInfo = modpsapi.NewProc("GetProcessMemoryInfo")
+	procEnumProcesses              = modpsapi.NewProc("EnumProcesses")
+	procGetPerformanceInfo         = modpsapi.NewProc("GetPerformanceInfo")
+	procGetProcessMemoryInfo       = modpsapi.NewProc("GetProcessMemoryInfo")
+	procQueryFullProcessImageNameW = modkernel32.NewProc("QueryFullProcessImageNameW")
 
 	procOpenProcess         = modkernel32.NewProc("OpenProcess")
 	procCloseHandle         = modkernel32.NewProc("CloseHandle")
@@ -75,25 +71,6 @@ type processMemoryCountersEx struct {
 	privateUsage               uintptr
 }
 
-// gost:preserve-layout
-type procStats struct {
-	pid          uint32
-	lastBytes    uint64
-	currentBytes uint64
-	firstSeen    int64
-	lastSeen     int64
-	isUserProc   bool
-}
-
-type logEvent struct {
-	message [64]byte
-	msgType int
-	commit  float64
-	bytes   uint64
-	msgLen  int
-	pid     uint32
-}
-
 var (
 	myPid           uint32
 	mySid           *windows.SID
@@ -114,6 +91,8 @@ func init() {
 	procEnumProcesses.Find()
 	procGetPerformanceInfo.Find()
 	procGetProcessMemoryInfo.Find()
+	procQueryFullProcessImageNameW.Find()
+
 	procOpenProcess.Find()
 	procCloseHandle.Find()
 	procTerminateProcess.Find()
@@ -123,6 +102,26 @@ func init() {
 }
 
 func main() {
+	mutexName, err := windows.UTF16PtrFromString("Local\\GoomSingleInstanceMutex")
+	if err != nil {
+		panic("failed to create mutex name: " + err.Error())
+	}
+
+	h, err := windows.CreateMutex(nil, false, mutexName)
+	if err != nil {
+		if err == windows.ERROR_ALREADY_EXISTS {
+			windows.CloseHandle(h)
+
+			pl.Errorln("GOOM is already running, exiting.")
+
+			os.Exit(0)
+		}
+
+		panic("failed to create single instance mutex: " + err.Error())
+	}
+
+	defer windows.CloseHandle(h)
+
 	debug.SetMemoryLimit(32 << 20)
 
 	initMySid()
@@ -170,10 +169,13 @@ func monitor() {
 			// getting dangerous
 			if proc.lastBytes <= rogueLimit {
 				event := logEvent{
-					msgType: 1,
+					msgType: 1, // WARN
+					reason:  ReasonRogue,
 					pid:     proc.pid,
 					commit:  float64(commitUsed) / float64(commitLimit),
 					bytes:   proc.currentBytes,
+					name:    proc.name,
+					nameLen: proc.nameLen,
 				}
 
 				select {
@@ -193,15 +195,18 @@ func monitor() {
 	}
 
 	if pressureSamples >= RequiredSamples {
-		victim := selectVictim(rogueLimit)
+		victim, reason := selectVictim(rogueLimit)
 		if victim != nil {
 			killProcess(victim.pid)
 
 			logEv := logEvent{
-				msgType: 2,
+				msgType: 2, // KILL
+				reason:  reason,
 				pid:     victim.pid,
 				commit:  float64(commitUsed) / float64(commitLimit),
 				bytes:   victim.currentBytes,
+				name:    victim.name,
+				nameLen: victim.nameLen,
 			}
 
 			select {
@@ -214,50 +219,11 @@ func monitor() {
 	}
 }
 
-func updateProcs() {
-	count := getPids()
-
-	slices.Sort(count)
-
-	count = slices.Compact(count)
-
-	nextProcs = nextProcs[:0]
-
-	now := time.Now().UnixNano()
-
-	for _, pid := range count {
-		if len(nextProcs) == cap(nextProcs) {
-			break
-		}
-
-		idx, found := slices.BinarySearchFunc(currentProcs, pid, func(p procStats, t uint32) int {
-			return cmp.Compare(p.pid, t)
-		})
-
-		var stats procStats
-
-		if found {
-			stats = currentProcs[idx]
-			stats.lastBytes = stats.currentBytes
-		} else {
-			stats.pid = pid
-			stats.firstSeen = now
-			stats.isUserProc = isMyProcess(pid)
-		}
-
-		stats.lastSeen = now
-		stats.currentBytes = getPrivateBytes(pid)
-
-		nextProcs = append(nextProcs, stats)
-	}
-
-	currentProcs, nextProcs = nextProcs, currentProcs
-}
-
-func selectVictim(rogueLimit uint64) *procStats {
+func selectVictim(rogueLimit uint64) (*procStats, LogReason) {
 	var (
-		victim   *procStats
-		maxScore float64
+		victim     *procStats
+		maxScore   float64
+		bestReason LogReason
 	)
 
 	for i := range currentProcs {
@@ -272,19 +238,30 @@ func selectVictim(rogueLimit uint64) *procStats {
 
 		growth := max(0, float64(proc.currentBytes)-float64(proc.lastBytes))
 
-		score := float64(proc.currentBytes) + growth*10.0
+		sizeScore := float64(proc.currentBytes)
+		growthScore := growth * 10.0
+		score := sizeScore + growthScore
+
+		var reason LogReason
+		if growthScore > sizeScore {
+			reason = ReasonRapidGrowth
+		} else {
+			reason = ReasonExcessiveSize
+		}
 
 		if proc.currentBytes > rogueLimit && growth > 0 {
 			score *= 100.0
+			reason = ReasonRogue
 		}
 
 		if score > maxScore {
 			maxScore = score
 			victim = proc
+			bestReason = reason
 		}
 	}
 
-	return victim
+	return victim, bestReason
 }
 
 func getSystemMemory() (commitUsed, commitLimit, physicalTotal, physicalAvail uint64) {
@@ -300,21 +277,6 @@ func getSystemMemory() (commitUsed, commitLimit, physicalTotal, physicalAvail ui
 	pageSize := uint64(info.pageSize)
 
 	return uint64(info.commitTotal) * pageSize, uint64(info.commitLimit) * pageSize, uint64(info.physicalTotal) * pageSize, uint64(info.physicalAvailable) * pageSize
-}
-
-func getPids() []uint32 {
-	r1, _, _ := syscall.SyscallN(procEnumProcesses.Addr(), uintptr(unsafe.Pointer(&pids[0])), uintptr(len(pids)*4), uintptr(unsafe.Pointer(&cbNeeded)))
-	if r1 == 0 {
-		return pids[:0]
-	}
-
-	count := cbNeeded / 4
-
-	if count > uint32(len(pids)) {
-		count = uint32(len(pids))
-	}
-
-	return pids[:count]
 }
 
 func getPrivateBytes(pid uint32) uint64 {
@@ -337,163 +299,4 @@ func getPrivateBytes(pid uint32) uint64 {
 	}
 
 	return uint64(counters.privateUsage)
-}
-
-func isMyProcess(pid uint32) bool {
-	r1, _, _ := syscall.SyscallN(procOpenProcess.Addr(), windows.PROCESS_QUERY_LIMITED_INFORMATION, 0, uintptr(pid))
-	if r1 == 0 {
-		return false
-	}
-
-	handle := r1
-
-	defer syscall.SyscallN(procCloseHandle.Addr(), handle)
-
-	var token uintptr
-
-	r1, _, _ = syscall.SyscallN(procOpenProcessToken.Addr(), handle, windows.TOKEN_QUERY, uintptr(unsafe.Pointer(&token)))
-	if r1 == 0 {
-		return false
-	}
-
-	defer syscall.SyscallN(procCloseHandle.Addr(), token)
-
-	var retLen uint32
-
-	r1, _, _ = syscall.SyscallN(
-		procGetTokenInformation.Addr(),
-		token,
-		windows.TokenUser,
-		uintptr(unsafe.Pointer(&tokenInfoBuffer[0])),
-		uintptr(len(tokenInfoBuffer)*int(unsafe.Sizeof(tokenInfoBuffer[0]))),
-		uintptr(unsafe.Pointer(&retLen)),
-	)
-
-	if r1 == 0 {
-		return false
-	}
-
-	tokenUser := (*windows.Tokenuser)(unsafe.Pointer(&tokenInfoBuffer[0]))
-
-	r1, _, _ = syscall.SyscallN(procEqualSid.Addr(), uintptr(unsafe.Pointer(mySid)), uintptr(unsafe.Pointer(tokenUser.User.Sid)))
-
-	return r1 != 0
-}
-
-func killProcess(pid uint32) {
-	r1, _, _ := syscall.SyscallN(procOpenProcess.Addr(), windows.PROCESS_TERMINATE, 0, uintptr(pid))
-	if r1 == 0 {
-		return
-	}
-
-	handle := r1
-
-	defer syscall.SyscallN(procCloseHandle.Addr(), handle)
-
-	syscall.SyscallN(procTerminateProcess.Addr(), handle, 1)
-}
-
-func initMySid() {
-	myPid = uint32(os.Getpid())
-
-	handle := windows.CurrentProcess()
-
-	var token windows.Token
-
-	err := windows.OpenProcessToken(handle, windows.TOKEN_QUERY, &token)
-	if err != nil {
-		panic("failed to get process token: " + err.Error())
-	}
-
-	defer token.Close()
-
-	tokenUser, err := token.GetTokenUser()
-	if err != nil {
-		panic("failed to get token user: " + err.Error())
-	}
-
-	globalTokenUser = tokenUser
-	mySid = tokenUser.User.Sid
-}
-
-func sendMsg(msgType int, text string) {
-	var event logEvent
-
-	event.msgType = msgType
-	event.msgLen = copy(event.message[:], text)
-
-	select {
-	case logChan <- event:
-	default:
-	}
-}
-
-func startLogger() {
-	pl := plain.New()
-
-	path := "goom.log"
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		path = filepath.Join(home, path)
-	} else {
-		pl.Warnf("Failed to get user home: %v\n", err)
-	}
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		pl.Warnf("Failed to open log: %v\n", err)
-	}
-
-	go func() {
-		if file != nil {
-			defer file.Close()
-		}
-
-		var buf []byte
-
-		for ev := range logChan {
-			buf = buf[:0]
-
-			switch ev.msgType {
-			case 0:
-				buf = append(buf, "INFO: "...)
-			case 1:
-				buf = append(buf, "WARN: "...)
-			case 2:
-				buf = append(buf, "KILL: "...)
-			}
-
-			if ev.msgLen > 0 {
-				buf = append(buf, ev.message[:ev.msgLen]...)
-			} else {
-				buf = append(buf, "PID: "...)
-				buf = strconv.AppendUint(buf, uint64(ev.pid), 10)
-
-				buf = append(buf, " Commit: "...)
-				buf = strconv.AppendFloat(buf, ev.commit*100, 'f', 2, 64)
-
-				buf = append(buf, "% Mem: "...)
-				buf = strconv.AppendUint(buf, ev.bytes/(1<<20), 10)
-				buf = append(buf, " MB"...)
-			}
-
-			buf = append(buf, '\n')
-
-			logStr := string(buf[:len(buf)-1])
-
-			switch ev.msgType {
-			case 0:
-				pl.Println(logStr)
-			case 1:
-				pl.Warnln(logStr)
-			case 2:
-				pl.Errorln(logStr)
-			}
-
-			if file != nil {
-				file.Write(buf)
-			}
-		}
-	}()
 }
