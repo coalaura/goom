@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -29,20 +30,39 @@ type logEvent struct {
 	reason  LogReason
 }
 
+var (
+	logMu      sync.RWMutex
+	logClosed  bool
+	loggerDone = make(chan struct{})
+)
+
+func sendEvent(ev logEvent) {
+	logMu.RLock()
+	defer logMu.RUnlock()
+
+	if logClosed {
+		return
+	}
+
+	select {
+	case logChan <- ev:
+	default:
+	}
+}
+
 func sendMsg(msgType int, text string) {
 	var event logEvent
 
 	event.msgType = msgType
 	event.msgLen = copy(event.message[:], text)
 
-	select {
-	case logChan <- event:
-	default:
-	}
+	sendEvent(event)
 }
 
 func startLogger(w io.Writer, useColor bool) {
 	go func() {
+		defer close(loggerDone)
+
 		buf := make([]byte, 0, 512)
 
 		for ev := range logChan {
@@ -124,6 +144,18 @@ func startLogger(w io.Writer, useColor bool) {
 			w.Write(buf)
 		}
 	}()
+}
+
+func stopLogger() {
+	logMu.Lock()
+	if !logClosed {
+		logClosed = true
+
+		close(logChan)
+	}
+	logMu.Unlock()
+
+	<-loggerDone
 }
 
 func appendUintPadded(buf []byte, val uint64, width int) []byte {

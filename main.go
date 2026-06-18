@@ -235,10 +235,7 @@ func monitor() {
 					nameLen: proc.nameLen,
 				}
 
-				select {
-				case logChan <- event:
-				default:
-				}
+				sendEvent(event)
 			}
 
 			break
@@ -268,10 +265,7 @@ func monitor() {
 				nameLen: victim.nameLen,
 			}
 
-			select {
-			case logChan <- logEv:
-			default:
-			}
+			sendEvent(logEv)
 
 			pressureSamples = 0
 		}

@@ -150,8 +150,8 @@ func runMonitorLoop(stopChan <-chan struct{}) {
 		case <-stopChan:
 			sendMsg(0, "GOOM service stopping...")
 
-			// Allow a tiny window for the channel message to write to disk
-			time.Sleep(50 * time.Millisecond)
+			stopLogger()
+
 			dw.Close()
 
 			return
