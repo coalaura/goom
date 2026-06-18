@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -16,9 +18,11 @@ import (
 
 var (
 	modwtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
+	moduserenv  = windows.NewLazySystemDLL("userenv.dll")
 
 	procWTSGetActiveConsoleSessionId = modkernel32.NewProc("WTSGetActiveConsoleSessionId")
 	procWTSQueryUserToken            = modwtsapi32.NewProc("WTSQueryUserToken")
+	procGetUserProfileDirectoryW     = moduserenv.NewProc("GetUserProfileDirectoryW")
 )
 
 const (
@@ -29,6 +33,60 @@ const (
 )
 
 type goomService struct{}
+
+type dynamicFileWriter struct {
+	path string
+	file *os.File
+	mu   sync.Mutex
+}
+
+func (dfw *dynamicFileWriter) Write(p []byte) (n int, err error) {
+	dfw.mu.Lock()
+	defer dfw.mu.Unlock()
+
+	if dfw.file == nil {
+		return len(p), nil
+	}
+
+	return dfw.file.Write(p)
+}
+
+func (dfw *dynamicFileWriter) Redirect(path string) {
+	dfw.mu.Lock()
+	defer dfw.mu.Unlock()
+
+	if path == dfw.path {
+		return
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+
+	if dfw.file != nil {
+		dfw.file.Close()
+	}
+
+	dfw.file = file
+	dfw.path = path
+}
+
+func (dfw *dynamicFileWriter) Close() error {
+	dfw.mu.Lock()
+	defer dfw.mu.Unlock()
+
+	if dfw.file != nil {
+		err := dfw.file.Close()
+
+		dfw.file = nil
+		dfw.path = ""
+
+		return err
+	}
+
+	return nil
+}
 
 func (m *goomService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	changes <- svc.Status{State: svc.StartPending}
@@ -42,17 +100,16 @@ func (m *goomService) Execute(args []string, r <-chan svc.ChangeRequest, changes
 	for {
 		var breakOut bool
 
-		select {
-		case c := <-r:
-			switch c.Cmd {
-			case svc.Interrogate:
-				changes <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				close(stopChan)
+		cr := <-r
 
-				breakOut = true
-			default:
-			}
+		switch cr.Cmd {
+		case svc.Interrogate:
+			changes <- cr.CurrentStatus
+		case svc.Stop, svc.Shutdown:
+			close(stopChan)
+
+			breakOut = true
+		default:
 		}
 
 		if breakOut {
@@ -69,7 +126,12 @@ func runMonitorLoop(stopChan <-chan struct{}) {
 	debug.SetMemoryLimit(32 << 20)
 
 	initMySid()
-	startLogger()
+
+	dw := &dynamicFileWriter{}
+
+	updateActiveUser(dw)
+
+	startLogger(dw, false)
 
 	currentProcs = make([]procStats, 0, MaxProcs)
 	nextProcs = make([]procStats, 0, MaxProcs)
@@ -82,20 +144,25 @@ func runMonitorLoop(stopChan <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
-			updateActiveUser()
+			updateActiveUser(dw)
+
 			monitor()
 		case <-stopChan:
 			sendMsg(0, "GOOM service stopping...")
+
+			// Allow a tiny window for the channel message to write to disk
+			time.Sleep(50 * time.Millisecond)
+			dw.Close()
 
 			return
 		}
 	}
 }
 
-func getActiveConsoleUser() (*windows.SID, error) {
+func getActiveConsoleUser() (*windows.SID, string, error) {
 	r1, _, _ := syscall.SyscallN(procWTSGetActiveConsoleSessionId.Addr())
 	if r1 == 0xFFFFFFFF {
-		return nil, fmt.Errorf("no active console session")
+		return nil, "", fmt.Errorf("no active console session")
 	}
 
 	sessionID := uint32(r1)
@@ -104,31 +171,54 @@ func getActiveConsoleUser() (*windows.SID, error) {
 
 	r1, _, errNo := syscall.SyscallN(procWTSQueryUserToken.Addr(), uintptr(sessionID), uintptr(unsafe.Pointer(&token)))
 	if r1 == 0 {
-		return nil, errNo
+		return nil, "", errNo
 	}
 
 	defer token.Close()
 
 	tokenUser, err := token.GetTokenUser()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get token user: %w", err)
+		return nil, "", fmt.Errorf("failed to get token user: %w", err)
 	}
 
 	sidCopy, err := tokenUser.User.Sid.Copy()
 	if err != nil {
-		return nil, fmt.Errorf("failed to copy SID: %w", err)
+		return nil, "", fmt.Errorf("failed to copy SID: %w", err)
 	}
 
-	return sidCopy, nil
+	var profileDir [512]uint16
+
+	size := uint32(len(profileDir))
+
+	r1, _, err = syscall.SyscallN(
+		procGetUserProfileDirectoryW.Addr(),
+		uintptr(token),
+		uintptr(unsafe.Pointer(&profileDir[0])),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r1 == 0 {
+		return nil, "", err
+	}
+
+	homeDir := windows.UTF16ToString(profileDir[:size])
+
+	return sidCopy, homeDir, nil
 }
 
-func updateActiveUser() {
-	sid, err := getActiveConsoleUser()
+func updateActiveUser(dw *dynamicFileWriter) {
+	sid, home, err := getActiveConsoleUser()
 	if err == nil {
 		mySid = sid
+
+		dw.Redirect(filepath.Join(home, "goom.log"))
 	} else {
 		if globalTokenUser != nil {
 			mySid = globalTokenUser.User.Sid
+		}
+
+		home, err := os.UserHomeDir()
+		if err == nil {
+			dw.Redirect(filepath.Join(home, "goom.log"))
 		}
 	}
 }

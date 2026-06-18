@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/term"
 )
 
 const (
@@ -154,7 +155,7 @@ func main() {
 	debug.SetMemoryLimit(32 << 20)
 
 	initMySid()
-	startLogger()
+	startLogger(os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
 
 	currentProcs = make([]procStats, 0, MaxProcs)
 	nextProcs = make([]procStats, 0, MaxProcs)

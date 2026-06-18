@@ -30,11 +30,7 @@ func getPids() []uint32 {
 		return pids[:0]
 	}
 
-	count := scratchCbNeeded / 4
-
-	if count > uint32(len(pids)) {
-		count = uint32(len(pids))
-	}
+	count := min(scratchCbNeeded/4, uint32(len(pids)))
 
 	return pids[:count]
 }

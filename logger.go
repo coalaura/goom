@@ -1,11 +1,9 @@
 package main
 
 import (
-	"os"
+	"io"
 	"strconv"
 	"time"
-
-	"golang.org/x/term"
 )
 
 type LogReason uint8
@@ -19,8 +17,6 @@ const (
 
 const targetProcessNameWidth = 20
 
-var useColor bool
-
 type logEvent struct {
 	message [64]byte
 	name    [32]byte
@@ -31,10 +27,6 @@ type logEvent struct {
 	nameLen int
 	pid     uint32
 	reason  LogReason
-}
-
-func init() {
-	useColor = term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 func sendMsg(msgType int, text string) {
@@ -49,7 +41,7 @@ func sendMsg(msgType int, text string) {
 	}
 }
 
-func startLogger() {
+func startLogger(w io.Writer, useColor bool) {
 	go func() {
 		buf := make([]byte, 0, 512)
 
@@ -129,11 +121,7 @@ func startLogger() {
 
 			buf = append(buf, '\n')
 
-			if ev.msgType == 0 {
-				_, _ = os.Stdout.Write(buf)
-			} else {
-				_, _ = os.Stderr.Write(buf)
-			}
+			w.Write(buf)
 		}
 	}()
 }
