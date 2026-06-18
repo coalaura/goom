@@ -18,7 +18,24 @@ goom runs in the background and watches system commit memory. If available headr
 
 ## Installation
 
-Download the latest binary from [Releases](https://github.com/coalaura/goom/releases) and run it. No installation required. Run it at startup via Task Scheduler or a shortcut in your startup folder if you want it always active.
+Download the latest binary from [Releases](https://github.com/coalaura/goom/releases) and run it.
+
+### Running as a Windows Service
+
+goom can run as a background Windows Service. This is the recommended approach as it starts automatically with Windows and runs in the background without keeping a terminal window open.
+
+To manage the service, open an elevated Command Prompt or PowerShell:
+
+* **Install & Start Service:**
+  ```cmd
+  goom.exe --install
+  ```
+* **Stop & Uninstall Service:**
+  ```cmd
+  goom.exe --uninstall
+  ```
+
+*Note: When running as a service, goom dynamically tracks the active logged-in console session, monitors/targets that specific user's processes, and writes the log file to `goom.log` in their user home directory.*
 
 ## Building
 
