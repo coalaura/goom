@@ -155,6 +155,12 @@ func main() {
 	debug.SetMemoryLimit(32 << 20)
 
 	initMySid()
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		loadConfig(home)
+	}
+
 	startLogger(os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
 
 	currentProcs = make([]procStats, 0, MaxProcs)
@@ -190,8 +196,17 @@ func handleFlags() {
 		}
 
 		fmt.Println("Service uninstalled successfully.")
+	case "--restart":
+		err := restartService()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to restart service: %v\n", err)
+
+			os.Exit(1)
+		}
+
+		fmt.Println("Service restarted successfully.")
 	default:
-		fmt.Fprintf(os.Stderr, "unknown flag: %s\nUsage:\n  goom.exe [--install | --uninstall]\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown flag: %s\nUsage:\n  goom.exe [--install | --uninstall | --restart]\n", os.Args[1])
 
 		os.Exit(1)
 	}
@@ -221,6 +236,10 @@ func monitor() {
 	for i := range currentProcs {
 		proc := &currentProcs[i]
 		if proc.isUserProc && proc.pid != myPid && proc.currentBytes > rogueLimit && proc.currentBytes > proc.lastBytes {
+			if isExcluded(proc.name[:proc.nameLen]) {
+				continue
+			}
+
 			rogueFound = true
 
 			// getting dangerous
@@ -286,6 +305,10 @@ func selectVictim(rogueLimit uint64) (int, LogReason) {
 		}
 
 		if proc.currentBytes < MinKillBytes {
+			continue
+		}
+
+		if isExcluded(proc.name[:proc.nameLen]) {
 			continue
 		}
 

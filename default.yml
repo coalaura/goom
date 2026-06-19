@@ -1,0 +1,8 @@
+# GOOM Configuration File
+# 
+# Add exact process names or substrings of process names that GOOM should never kill.
+# Matching is case-insensitive.
+
+exclude:
+  # - "gopls.exe"
+  # - "dontkillme"

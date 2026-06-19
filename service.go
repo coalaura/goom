@@ -211,6 +211,8 @@ func updateActiveUser(dw *dynamicFileWriter) {
 		mySid = sid
 
 		dw.Redirect(filepath.Join(home, "goom.log"))
+
+		loadConfig(home)
 	} else {
 		if globalTokenUser != nil {
 			mySid = globalTokenUser.User.Sid
@@ -219,6 +221,8 @@ func updateActiveUser(dw *dynamicFileWriter) {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			dw.Redirect(filepath.Join(home, "goom.log"))
+
+			loadConfig(home)
 		}
 	}
 }
@@ -291,6 +295,45 @@ func uninstallService() error {
 	err = s.Delete()
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func restartService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("access denied; please run this command from an elevated (Administrator) command prompt")
+		}
+
+		return err
+	}
+
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("service %s is not installed", serviceName)
+	}
+
+	defer s.Close()
+
+	status, err := s.Query()
+	if err != nil {
+		return fmt.Errorf("failed to query service status: %w", err)
+	}
+
+	if status.State != svc.Stopped {
+		err = stopService(s)
+		if err != nil {
+			return fmt.Errorf("failed to stop service: %w", err)
+		}
+	}
+
+	err = s.Start()
+	if err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
 	}
 
 	return nil
