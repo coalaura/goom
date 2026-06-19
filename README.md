@@ -4,7 +4,7 @@ Linux has an OOM killer. When memory runs low, it picks a victim and ends it bef
 
 ## What does goom do?
 
-goom runs in the background and watches system commit memory. If available headroom drops below 5% of total commit (or 2 GB, whichever is larger) for 3 consecutive samples, it kills the heaviest user-mode process owned by the current user. It also watches for rogue processes: anything consuming more than 60% of physical RAM and still growing gets flagged immediately and killed on the next confirmed pressure window.
+goom runs in the background and watches system commit memory. If available headroom drops below 5% of total commit (or 2 GB, whichever is larger) for 4 consecutive samples, it kills the heaviest user-mode process owned by the current user. It also watches for rogue processes: anything consuming more than 60% of physical RAM and still growing gets flagged immediately and killed on the next confirmed pressure window.
 
 *goom never kills system processes or processes owned by other users.*
 
@@ -15,6 +15,23 @@ goom runs in the background and watches system commit memory. If available headr
 - Minimum process size to be eligible: 500 MB
 - Rogue threshold: >60% of physical RAM and actively growing
 - Logs to `goom.log` in the users home directory
+- Processes can be excluded from termination via `goom.yml` (see [Configuration](#configuration))
+
+## Configuration
+
+On first run goom creates a `goom.yml` in the user's home directory (the same directory as `goom.log`). When running as a service, this is the home directory of the active logged-in console user.
+
+Use it to whitelist processes that goom should never kill:
+
+```yaml
+exclude:
+  - "gopls.exe"
+  - "dontkillme"
+```
+
+- Matching is **case-insensitive**.
+- Each entry is matched as a **substring** of the process name, so `"chrome"` excludes `chrome.exe` and any process whose name contains `chrome`.
+- The config is reloaded automatically on each sampling tick (service mode re-reads it as the active user changes), so edits take effect without a restart.
 
 ## Installation
 
@@ -34,6 +51,11 @@ To manage the service, open an elevated Command Prompt or PowerShell:
   ```cmd
   goom.exe --uninstall
   ```
+* **Restart Service:**
+  ```cmd
+  goom.exe --restart
+  ```
+  Useful after editing `goom.yml`, if you want to reload any new config settings.
 
 *Note: When running as a service, goom dynamically tracks the active logged-in console session, monitors/targets that specific user's processes, and writes the log file to `goom.log` in their user home directory.*
 

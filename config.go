@@ -13,7 +13,7 @@ import (
 var defaultConfig []byte
 
 type Config struct {
-	Excludes [][]byte `yaml:"excludes"`
+	Exclude [][]byte `yaml:"exclude"`
 }
 
 var config Config
@@ -59,9 +59,9 @@ func loadConfig(homeDir string) {
 		return
 	}
 
-	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(config.Excludes)))
+	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(config.Exclude)))
 }
 
 func isExcluded(name []byte) bool {
-	return ContainsAnyFold(name, config.Excludes)
+	return ContainsAnyFold(name, config.Exclude)
 }
