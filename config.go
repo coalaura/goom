@@ -13,10 +13,10 @@ import (
 var defaultConfig []byte
 
 type Config struct {
-	Exclude [][]byte `yaml:"exclude"`
+	Exclude []string `yaml:"exclude"`
 }
 
-var config Config
+var excludedPatterns [][]byte
 
 func loadConfig(homeDir string) {
 	if homeDir == "" {
@@ -52,16 +52,24 @@ func loadConfig(homeDir string) {
 
 	defer file.Close()
 
-	err = yaml.NewDecoder(file).Decode(&config)
+	var cfg Config
+
+	err = yaml.NewDecoder(file).Decode(&cfg)
 	if err != nil {
 		sendMsg(1, fmt.Sprintf("Failed to decode config: %v", err.Error()))
 
 		return
 	}
 
-	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(config.Exclude)))
+	excludedPatterns = make([][]byte, len(cfg.Exclude))
+
+	for i, pattern := range cfg.Exclude {
+		excludedPatterns[i] = []byte(pattern)
+	}
+
+	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(excludedPatterns)))
 }
 
 func isExcluded(name []byte) bool {
-	return ContainsAnyFold(name, config.Exclude)
+	return ContainsAnyFold(name, excludedPatterns)
 }
