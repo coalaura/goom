@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/goccy/go-yaml"
 )
@@ -16,10 +17,17 @@ type Config struct {
 	Exclude []string `yaml:"exclude"`
 }
 
-var excludedPatterns [][]byte
+var (
+	loaded           atomic.Uint32
+	excludedPatterns [][]byte
+)
 
 func loadConfig(homeDir string) {
 	if homeDir == "" {
+		return
+	}
+
+	if !loaded.CompareAndSwap(0, 1) {
 		return
 	}
 
