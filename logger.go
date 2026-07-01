@@ -121,9 +121,9 @@ func startLogger(w io.Writer, useColor bool) {
 					buf = appendProcessName(buf, []byte("unknown"))
 				}
 
-				buf = append(buf, " | Mem: "...)
+				buf = append(buf, " | Private Commit: "...)
 				buf = appendUintPadded(buf, ev.bytes/(1<<20), 5)
-				buf = append(buf, " MB | Commit: "...)
+				buf = append(buf, " MB | System Commit: "...)
 				buf = appendCommitPadded(buf, ev.commit*100, 6)
 				buf = append(buf, " | "...)
 

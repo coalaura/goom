@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/goccy/go-yaml"
@@ -17,9 +19,18 @@ type Config struct {
 	Exclude []string `yaml:"exclude"`
 }
 
+type excludeSnapshot struct {
+	patterns [][]byte
+}
+
 var (
-	loaded           atomic.Uint32
-	excludedPatterns [][]byte
+	configMu sync.Mutex
+
+	loadedConfigPath    string
+	loadedConfigModTime int64
+	loadedConfigSize    int64
+
+	excludedPatterns atomic.Pointer[excludeSnapshot]
 )
 
 func loadConfig(homeDir string) {
@@ -27,15 +38,12 @@ func loadConfig(homeDir string) {
 		return
 	}
 
-	if !loaded.CompareAndSwap(0, 1) {
-		return
-	}
+	configMu.Lock()
+	defer configMu.Unlock()
 
 	configPath := filepath.Join(homeDir, "goom.yml")
 
-	sendMsg(0, fmt.Sprintf("Loading configuration: %s", configPath))
-
-	_, err := os.Stat(configPath)
+	info, err := os.Stat(configPath)
 	if os.IsNotExist(err) {
 		sendMsg(0, "Configuration file not found. Pre-filling default goom.yml...")
 
@@ -45,11 +53,24 @@ func loadConfig(homeDir string) {
 
 			return
 		}
-	} else if err != nil {
+
+		info, err = os.Stat(configPath)
+	}
+
+	if err != nil {
 		sendMsg(1, fmt.Sprintf("Failed to check config file: %v", err.Error()))
 
 		return
 	}
+
+	modTime := info.ModTime().UnixNano()
+	size := info.Size()
+
+	if configPath == loadedConfigPath && modTime == loadedConfigModTime && size == loadedConfigSize {
+		return
+	}
+
+	sendMsg(0, fmt.Sprintf("Loading configuration: %s", configPath))
 
 	file, err := os.OpenFile(configPath, os.O_RDONLY, 0)
 	if err != nil {
@@ -69,15 +90,31 @@ func loadConfig(homeDir string) {
 		return
 	}
 
-	excludedPatterns = make([][]byte, len(cfg.Exclude))
+	patterns := make([][]byte, 0, len(cfg.Exclude))
 
-	for i, pattern := range cfg.Exclude {
-		excludedPatterns[i] = []byte(pattern)
+	for _, pattern := range cfg.Exclude {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+
+		patterns = append(patterns, []byte(pattern))
 	}
 
-	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(excludedPatterns)))
+	excludedPatterns.Store(&excludeSnapshot{patterns: patterns})
+
+	loadedConfigPath = configPath
+	loadedConfigModTime = modTime
+	loadedConfigSize = size
+
+	sendMsg(0, fmt.Sprintf("Loaded %d excluded process pattern(s)", len(patterns)))
 }
 
 func isExcluded(name []byte) bool {
-	return ContainsAnyFold(name, excludedPatterns)
+	snapshot := excludedPatterns.Load()
+	if snapshot == nil {
+		return false
+	}
+
+	return ContainsAnyFold(name, snapshot.patterns)
 }
